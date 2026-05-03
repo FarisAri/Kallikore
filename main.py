@@ -14,6 +14,7 @@ from openai import OpenAI
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
+from typing import TypedDict
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -32,12 +33,6 @@ RESULTS_PER_QUERY   = 100    # articles fetched per search call
 TOP_N               = 20   # articles shown at the end
 SOURCE_COUNTRY      = "us" # ISO 3166 — change to "gb", "de", etc. or "" for global
 DAYS_BACK           = 1    # only surface articles from the past N days
-
-# ── Hardcoded profile — edit this ─────────────────────────────────────────────
-
-PROFILE = """
-
-"""
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
 
@@ -104,7 +99,6 @@ def get_top_country_news(country: str = SOURCE_COUNTRY, days_back: int = DAYS_BA
             timeout=10,
         )
         resp.raise_for_status()
-        articles = [obj for item in resp.json() for obj in item.get("news", [])]
 
         current_results = [
             {
@@ -112,10 +106,11 @@ def get_top_country_news(country: str = SOURCE_COUNTRY, days_back: int = DAYS_BA
                 "summary":     a.get("summary", "")[:300],
                 "image":       a.get("image", ""),
                 "url":         a.get("url", ""),
-                "date":        a.get("published", ""),
+                "date":        a.get("publish_date", ""),
             }
-            for a in articles
-            if a.get("title") and a.get("url") and a.get("image") and a.get("published")
+            for a in resp.json().get("top_news", [])
+            for a in a.get("news", [])
+            if a.get("title") and a.get("url") and a.get("image") and a.get("publish_date")
         ]
 
         results.extend(current_results)
@@ -159,7 +154,62 @@ def rank_articles(profile_vec: np.ndarray, articles: list[dict]) -> list[dict]:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 
-profile_text = PROFILE.strip()
+class User(TypedDict):
+    name: str
+    age: int
+    ethnicity: str
+    occupation: str
+    locations: list[str]
+    hobbies: list[str]
+    interests: list[str]
+    countries_of_interest: list[str]
+    extra: str
+
+
+def profile_to_text(profile: User) -> str:
+    """Convert structured profile data into a single text blob for embedding."""
+    
+    parts = []
+    if profile.get("name"):
+        parts.append(f"My name is {profile['name']}.")
+    if profile.get("age"):
+        parts.append(f"I am {profile['age']} years old.")
+    if profile.get("ethnicity"):
+        parts.append(f"My ethnicity is {profile['ethnicity']}.")
+    if profile.get("occupation"):
+        parts.append(f"My occupation is {profile['occupation']}.")
+    if profile.get("locations"):
+        locs = ", ".join(profile["locations"])
+        parts.append(f"I have lived in {locs}.")
+    if profile.get("hobbies"):
+        hobbies = ", ".join(profile["hobbies"])
+        parts.append(f"My hobbies include {hobbies}.")
+    if profile.get("interests"):
+        interests = ", ".join(profile["interests"])
+        parts.append(f"My interests include {interests}.")
+    if profile.get("countries_of_interest"):
+        countries = ", ".join(profile["countries_of_interest"])
+        parts.append(f"I'm particularly interested in news from {countries}.")
+    if profile.get("extra"):
+        parts.append(f"Additional info: {profile['extra']}")
+    return " ".join(parts)
+
+
+demo_profile: User = {
+    "name": "Aisha Khan",
+    "age":28,
+    "ethnicity": "Pakistani",
+    "occupation": "Data Scientist at a FinTech Startup",
+    "locations": ["Karachi, Pakistan", "London, UK"],
+    "hobbies": ["Cooking", "Traveling", "Yoga", "Reading"],
+    "interests": ["Finance", "Machine Learning", "Cryptocurrency", "Global Markets"],
+    "countries_of_interest": ["United Kingdom", "United States", "Germany"],
+    "extra": "I am deeply interested in how data science is transforming the financial industry and I want to stay informed about the latest trends in FinTech, cryptocurrency, and global economic developments."
+}
+
+
+
+profile_text = profile_to_text(demo_profile)
 profile_vec  = build_profile_embedding(profile_text)
 
 articles     = get_top_country_news("us", DAYS_BACK)
