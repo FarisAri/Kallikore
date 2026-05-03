@@ -1,0 +1,14 @@
+{
+  "user_location": "Portland, Oregon",
+  "hobbies": ["cycling", "climate policy", "indie games"],
+  "international_news_focus": ["Japan", "Germany", "Nigeria"],
+  "ethnicity": "Chinese American",
+  "age": 22,
+  "native_language": "English",
+  "occupation": "software",
+  "news_topics": ["AI", "local politics"],
+  "avoid_topics": ["celebrity gossip", "graphic violence"],
+  "etc": {
+    "sports_teams": ["Trail Blazers"]
+  }
+}

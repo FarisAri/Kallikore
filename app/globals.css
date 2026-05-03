@@ -1,0 +1,29 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #0c0f14;
+  --surface: #141922;
+  --border: #252b38;
+  --text: #e8ecf4;
+  --muted: #8b95a8;
+  --accent: #5b8def;
+  --accent-dim: #3d5a8a;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  color: var(--text);
+  background: radial-gradient(
+      ellipse 120% 80% at 50% -20%,
+      #1a2440 0%,
+      var(--bg) 55%
+    ),
+    var(--bg);
+  font-feature-settings: "rlig" 1, "calt" 1;
+}

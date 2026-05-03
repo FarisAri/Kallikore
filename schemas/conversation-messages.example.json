@@ -1,0 +1,12 @@
+[
+  {
+    "role": "user",
+    "content": "I mostly read tech and climate news, and I follow Japan.",
+    "createdAt": "2026-05-02T18:04:12.345Z"
+  },
+  {
+    "role": "assistant",
+    "content": "Great—what kind of climate coverage do you prefer: policy, science, or local impacts?",
+    "createdAt": "2026-05-02T18:04:18.901Z"
+  }
+]
