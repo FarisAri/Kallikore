@@ -26,11 +26,11 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "message is required" }, { status: 400 });
   }
 
-  if (!process.env.NVIDIA_API_KEY) {
+  if (!process.env.NVIDIA_API_KEY && !process.env.NVIDIA_API_KEYS) {
     return NextResponse.json(
       {
         error:
-          "Server missing NVIDIA_API_KEY. Add it to .env.local (see .env.example).",
+          "Server missing NVIDIA_API_KEY or NVIDIA_API_KEYS. Add it to .env.local (see .env.example).",
       },
       { status: 503 },
     );

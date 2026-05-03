@@ -4,6 +4,8 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import type { Article } from '@/lib/articles'
+import { shouldTranslateFromLanguage } from '@/lib/translation-policy'
+import { translateItems, type TranslateBatchResult } from '@/lib/translate-client'
 
 type Stage = 1 | 2 | 3
 
@@ -45,6 +47,57 @@ function articlePinSvg(article: Article): string {
   </svg>`
 }
 
+function articleTooltipHtml(article: Article, translated: Record<string, string> = {}): string {
+  const imageUrl = escapeHtml(article.imageUrl)
+  const location = escapeHtml(article.location)
+  const title = escapeHtml(translated.title ?? article.title)
+  const summary = escapeHtml((translated.summary ?? article.summary).replace('AI Summary: ', ''))
+  return `
+    <img src="${imageUrl}" class="tooltip-img" alt="">
+    <div class="tooltip-content">
+      <div class="tooltip-meta">${location}</div>
+      <h4>${title}</h4>
+      <p>${summary}</p>
+    </div>
+  `
+}
+
+function restorePinTooltips() {
+  const tooltips = document.querySelectorAll<HTMLElement>('.map-pin-tooltip')
+  tooltips.forEach(t => { t.style.opacity = '' })
+}
+
+function positionPinTooltip(anchor: HTMLElement, tooltip: HTMLElement) {
+  const pinRect = anchor.getBoundingClientRect()
+  const mapRect = document.getElementById('map')?.getBoundingClientRect()
+  const viewportLeft = mapRect?.left ?? 0
+  const viewportRight = mapRect?.right ?? window.innerWidth
+  const viewportTop = Math.max(mapRect?.top ?? 0, 72)
+  const viewportBottom = mapRect?.bottom ?? window.innerHeight
+  const margin = 12
+
+  const wasVisible = tooltip.classList.contains('map-pin-tooltip--visible')
+  tooltip.classList.add('map-pin-tooltip--measuring')
+  tooltip.classList.add('map-pin-tooltip--visible')
+  const tipRect = tooltip.getBoundingClientRect()
+  tooltip.classList.remove('map-pin-tooltip--measuring')
+  if (!wasVisible) tooltip.classList.remove('map-pin-tooltip--visible')
+
+  let left = pinRect.left + pinRect.width / 2 - tipRect.width / 2
+  left = Math.min(left, viewportRight - tipRect.width - margin)
+  left = Math.max(left, viewportLeft + margin)
+
+  let top = pinRect.top - tipRect.height - 12
+  if (top < viewportTop + margin) {
+    top = pinRect.bottom + 12
+  }
+  top = Math.min(top, viewportBottom - tipRect.height - margin)
+  top = Math.max(top, viewportTop + margin)
+
+  tooltip.style.setProperty('--tooltip-left', `${left}px`)
+  tooltip.style.setProperty('--tooltip-top', `${top}px`)
+}
+
 export default function Globe({
   stage,
   articles,
@@ -56,11 +109,14 @@ export default function Globe({
   const mapRef = useRef<maplibregl.Map | null>(null)
   const [mapReady, setMapReady] = useState(false)      // style + markers ready
   const [tilesLoaded, setTilesLoaded] = useState(false) // first full render done
+  const [tooltipTranslations, setTooltipTranslations] = useState<TranslateBatchResult>({})
 
   const spinningRef = useRef(true)
   const orbitingCityRef = useRef(false)
   const currentRotationRef = useRef(0)
   const markersRef = useRef<maplibregl.Marker[]>([])
+  const markerRootsRef = useRef<Map<string, HTMLElement>>(new Map())
+  const tooltipElementsRef = useRef<Map<string, HTMLElement>>(new Map())
   const animFrameRef = useRef<number>(0)
   const onArticleClickRef = useRef(onArticleClick)
   const moveEndCleanupRef = useRef<(() => void) | null>(null)
@@ -79,6 +135,36 @@ export default function Globe({
   useEffect(() => {
     onArticleClickRef.current = onArticleClick
   })
+
+  useEffect(() => {
+    setTooltipTranslations({})
+    const items = articles
+      .filter(article => shouldTranslateFromLanguage(article.language))
+      .map(article => ({
+        articleId: article.id,
+        sourceLanguage: article.language,
+        parts: [
+          { field: 'title' as const, text: article.title },
+          { field: 'summary' as const, text: article.summary },
+        ].filter(part => part.text.trim().length > 0),
+      }))
+      .filter(item => item.parts.length > 0)
+
+    if (items.length === 0) return
+
+    let cancelled = false
+    void translateItems(items, { cacheOnly: true })
+      .then(map => {
+        if (!cancelled) setTooltipTranslations(map)
+      })
+      .catch(() => {
+        if (!cancelled) setTooltipTranslations({})
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [articles])
 
   // Initialize map once on mount
   useEffect(() => {
@@ -185,6 +271,9 @@ export default function Globe({
       cancelAnimationFrame(animFrameRef.current)
       markersRef.current.forEach(m => m.remove())
       markersRef.current = []
+      markerRootsRef.current.clear()
+      tooltipElementsRef.current.forEach(t => t.remove())
+      tooltipElementsRef.current.clear()
       map.remove()
       mapRef.current = null
     }
@@ -220,6 +309,7 @@ export default function Globe({
       rightPanelPinned && (stage === 2 || stage === 3) ? 450 : 0
 
     if (stage === 1) {
+      restorePinTooltips()
       orbitingCityRef.current = false
       spinningRef.current = false
       map.stop()
@@ -232,6 +322,7 @@ export default function Globe({
       map.once('moveend', onMoveEnd)
       moveEndCleanupRef.current = () => map.off('moveend', onMoveEnd)
     } else if (stage === 2 && selectedArticle == null) {
+      restorePinTooltips()
       orbitingCityRef.current = false
       spinningRef.current = false
       map.stop()
@@ -292,7 +383,7 @@ export default function Globe({
 
     const onMoveEnd = () => {
       orbitingCityRef.current = true
-      tooltips.forEach(t => { t.style.opacity = '' })
+      restorePinTooltips()
       moveEndCleanupRef.current = null
     }
 
@@ -303,9 +394,21 @@ export default function Globe({
       clearTimeout(timer)
       map.off('moveend', onMoveEnd)
       orbitingCityRef.current = false
+      restorePinTooltips()
       // Do not clear moveEndCleanupRef here — the stage layout effect may have replaced it with its own disposer.
     }
   }, [selectedArticle, rightPanelPinned])
+
+  useEffect(() => {
+    for (const article of articles) {
+      const tooltip = tooltipElementsRef.current.get(String(article.id))
+      if (!tooltip) continue
+      tooltip.innerHTML = articleTooltipHtml(
+        article,
+        tooltipTranslations[String(article.id)] ?? {},
+      )
+    }
+  }, [articles, tooltipTranslations])
 
   // Add / refresh map markers when articles are set (after map is ready)
   useEffect(() => {
@@ -314,6 +417,9 @@ export default function Globe({
 
     markersRef.current.forEach(m => m.remove())
     markersRef.current = []
+    markerRootsRef.current.clear()
+    tooltipElementsRef.current.forEach(t => t.remove())
+    tooltipElementsRef.current.clear()
 
     articles.forEach(article => {
       const root = document.createElement('div')
@@ -327,26 +433,29 @@ export default function Globe({
 
       const tooltip = document.createElement('div')
       tooltip.className = 'map-pin-tooltip'
-      const imageUrl = escapeHtml(article.imageUrl)
-      const location = escapeHtml(article.location)
-      const title = escapeHtml(article.title)
-      const summary = escapeHtml(article.summary.replace('AI Summary: ', ''))
-      tooltip.innerHTML = `
-        <img src="${imageUrl}" class="tooltip-img" alt="">
-        <div class="tooltip-content">
-          <div class="tooltip-meta">${location}</div>
-          <h4>${title}</h4>
-          <p>${summary}</p>
-        </div>
-      `
+      tooltip.innerHTML = articleTooltipHtml(article)
+      document.body.appendChild(tooltip)
 
       hit.addEventListener('click', e => {
         e.stopPropagation()
         onArticleClickRef.current(article)
       })
+      hit.addEventListener('mouseenter', () => {
+        positionPinTooltip(hit, tooltip)
+        tooltip.classList.add('map-pin-tooltip--visible')
+      })
+      hit.addEventListener('focus', () => {
+        positionPinTooltip(hit, tooltip)
+        tooltip.classList.add('map-pin-tooltip--visible')
+      })
+      hit.addEventListener('mouseleave', () => {
+        tooltip.classList.remove('map-pin-tooltip--visible')
+      })
+      hit.addEventListener('blur', () => {
+        tooltip.classList.remove('map-pin-tooltip--visible')
+      })
 
       root.appendChild(hit)
-      root.appendChild(tooltip)
 
       const marker = new maplibregl.Marker({
         element: root,
@@ -358,11 +467,16 @@ export default function Globe({
         .addTo(map)
 
       markersRef.current.push(marker)
+      markerRootsRef.current.set(String(article.id), root)
+      tooltipElementsRef.current.set(String(article.id), tooltip)
     })
 
     return () => {
       markersRef.current.forEach(m => m.remove())
       markersRef.current = []
+      markerRootsRef.current.clear()
+      tooltipElementsRef.current.forEach(t => t.remove())
+      tooltipElementsRef.current.clear()
     }
   }, [articles, mapReady])
 

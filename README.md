@@ -36,4 +36,5 @@ Required for live results:
 
 Optional:
 
+- `GOOGLE_TRANSLATE_API_KEY` — article list/detail translation via `/api/translate` (same key in `.env.local`).
 - Set `PYTHON_BIN` if your Python command is not `python`.

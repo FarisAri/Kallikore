@@ -4,7 +4,7 @@ import {
   profileFieldsChanged,
 } from "@/lib/profile-field-timestamps";
 import { coerceProfile, emptyProfile, mergeProfiles, type UserProfile } from "@/lib/profile";
-import { getChatModel, getOpenAIClient } from "@/lib/openai-client";
+import { getChatModel, getThrottledOpenAIClient } from "@/lib/openai-client";
 import type { SessionData, StoredChatMessage } from "@/lib/session-store";
 import { toOpenAIMessages } from "@/lib/session-store";
 
@@ -116,11 +116,11 @@ function formatTranscript(
 }
 
 async function completeChat(
-  client: OpenAI,
   model: string,
   messages: OpenAI.Chat.ChatCompletionMessageParam[],
   maxTokens: number,
 ): Promise<string> {
+  const client = await getThrottledOpenAIClient();
   const res = await client.chat.completions.create({
     model,
     messages,
@@ -150,7 +150,6 @@ export async function runConversationTurn(
   userMessageAt: string;
   assistantMessageAt: string;
 }> {
-  const client = getOpenAIClient();
   const model = getChatModel();
 
   const trimmed = userText.trim();
@@ -172,7 +171,6 @@ export async function runConversationTurn(
   ];
 
   const assistantText = await completeChat(
-    client,
     model,
     chatMessages,
     CHAT_MAX_TOKENS,
@@ -208,7 +206,6 @@ export async function runConversationTurn(
 
   try {
     const rawProfileText = await completeChat(
-      client,
       model,
       extractorMessages,
       PROFILE_EXTRACT_MAX_TOKENS,

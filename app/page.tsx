@@ -22,10 +22,7 @@ const INITIAL_MESSAGE: ChatMessage = {
 
 function profileReadyForNews(profile: UserProfile | null): boolean {
   if (!profile) return false
-  return (
-    profile.international_news_focus.length > 0 &&
-    (profile.news_topics.length > 0 || profile.hobbies.length > 0 || !!profile.occupation)
-  )
+  return profile.news_topics.length > 0 || profile.hobbies.length > 0 || !!profile.occupation
 }
 
 async function createSession() {
@@ -48,13 +45,14 @@ export default function Home() {
   const [messages, setMessages] = useState<ChatMessage[]>([INITIAL_MESSAGE])
   const [showGenerateButton, setShowGenerateButton] = useState(false)
   const [isChatHidden, setIsChatHidden] = useState(false)
-  const [isChatDropdownMode, setIsChatDropdownMode] = useState(false)
   const [articles, setArticles] = useState<Article[]>([])
   const [selectedArticle, setSelectedArticle] = useState<Article | null>(null)
   const [isPanelForcedOpen, setIsPanelForcedOpen] = useState(false)
   const [isProfileOpen, setIsProfileOpen] = useState(false)
   const [isSending, setIsSending] = useState(false)
   const [isGenerating, setIsGenerating] = useState(false)
+  const [isSavingProfile, setIsSavingProfile] = useState(false)
+  const [profileError, setProfileError] = useState<string | null>(null)
   const [newsStatus, setNewsStatus] = useState<string | null>(null)
   const [newsDebugSteps, setNewsDebugSteps] = useState<string[]>([])
   const [rightPanelPeekDismissed, setRightPanelPeekDismissed] = useState(false)
@@ -148,7 +146,6 @@ export default function Home() {
     newsAbortRef.current = ac
 
     setIsGenerating(true)
-    setIsChatDropdownMode(true)
     setIsChatHidden(true)
     setStage(2)
     setSelectedArticle(null)
@@ -170,21 +167,15 @@ export default function Home() {
 
       const data = await res.json() as {
         articles?: Article[]
-        debugSteps?: string[]
         error?: string
         message?: string
         mode?: string
-        warnings?: string[]
       }
       if (ac.signal.aborted) return
       if (!res.ok) throw new Error(data.error ?? `News request failed (${res.status})`)
 
       const nextArticles = data.articles ?? []
       setArticles(nextArticles)
-      setNewsDebugSteps([
-        ...(data.debugSteps ?? []),
-        ...(data.warnings ?? []).map((warning) => `warning: ${warning}`),
-      ])
       setNewsStatus(`${data.mode ?? 'news'} pipeline returned ${nextArticles.length} articles.`)
       if (!data.articles?.length) {
         setMessages((prev) => [...prev, { role: 'ai', text: data.message ?? 'No matching articles came back yet. Try adding more regions or interests.' }])
@@ -249,9 +240,36 @@ export default function Home() {
     setIsProfileOpen((prev) => !prev)
   }, [])
 
+  const handleProfileSave = useCallback(async (nextProfile: UserProfile) => {
+    if (!sessionId || isSavingProfile) return
+    setIsSavingProfile(true)
+    setProfileError(null)
+    try {
+      const res = await fetch(`/api/session/${encodeURIComponent(sessionId)}/profile`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profile: nextProfile }),
+      })
+      const data = await res.json() as { profile?: UserProfile; error?: string }
+      if (!res.ok) throw new Error(data.error ?? `Profile save failed (${res.status})`)
+      if (data.profile) {
+        setProfile(data.profile)
+        setShowGenerateButton(profileReadyForNews(data.profile))
+      }
+      setIsProfileOpen(false)
+    } catch (e) {
+      setProfileError(e instanceof Error ? e.message : 'Profile save failed')
+    } finally {
+      setIsSavingProfile(false)
+    }
+  }, [isSavingProfile, sessionId])
+
   return (
     <>
-      <Navbar onChatToggle={handleChatToggle} onProfileToggle={handleProfileToggle} />
+      <Navbar
+        onChatToggle={handleChatToggle}
+        onProfileToggle={handleProfileToggle}
+      />
       <Globe
         stage={stage}
         articles={articles}
@@ -262,7 +280,8 @@ export default function Home() {
       <ChatStage
         messages={messages}
         isHidden={isChatHidden}
-        isDropdownMode={isChatDropdownMode}
+        isDropdownMode
+        recenterForRightPanel={isPanelForcedOpen && (stage === 2 || stage === 3)}
         showGenerateButton={showGenerateButton}
         isBusy={isSending || isGenerating}
         generateLabel={isGenerating ? 'Generating...' : 'Generate My News'}
@@ -296,7 +315,6 @@ export default function Home() {
           isForcedOpen={isPanelForcedOpen}
           peekDismissed={rightPanelPeekDismissed}
           status={newsStatus}
-          debugSteps={newsDebugSteps}
           onArticleClick={handleArticleClick}
           onBack={handleBack}
           onCollapse={handleRightPanelCollapse}
@@ -305,7 +323,10 @@ export default function Home() {
       <ProfilePanel
         profile={profile}
         isOpen={isProfileOpen}
+        isSaving={isSavingProfile}
+        error={profileError}
         onClose={() => setIsProfileOpen(false)}
+        onSave={handleProfileSave}
       />
     </>
   )

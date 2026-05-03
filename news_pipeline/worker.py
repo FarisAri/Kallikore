@@ -14,10 +14,15 @@ import hashlib
 import json
 import math
 import os
+import re
 import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import Any
 
+import numpy as np
 import requests
 try:
     from dotenv import load_dotenv
@@ -38,11 +43,19 @@ os.makedirs(HF_HOME, exist_ok=True)
 
 WORLD_NEWS_API_KEY = os.getenv("WORLD_NEWS_API_KEY", "").strip()
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "").strip()
+NVIDIA_API_KEYS_RAW = os.getenv("NVIDIA_API_KEYS", "").strip()
 NVIDIA_API_BASE_URL = os.getenv("NVIDIA_API_BASE_URL", "https://integrate.api.nvidia.com/v1").rstrip("/")
 NVIDIA_ENRICH_MODEL = os.getenv(
     "NVIDIA_ENRICH_MODEL",
     os.getenv("NVIDIA_CHAT_MODEL", "moonshotai/kimi-k2-instruct"),
 )
+NVIDIA_REQUEST_DELAY_SECONDS = max(
+    0.0,
+    float(os.getenv("NVIDIA_REQUEST_DELAY_MS", "1200")) / 1000.0,
+)
+NVIDIA_429_BACKOFF_SECONDS = max(0.0, float(os.getenv("NVIDIA_429_BACKOFF_SECONDS", "5")))
+NVIDIA_MAX_RETRIES = max(1, int(os.getenv("NVIDIA_MAX_RETRIES", "3")))
+NVIDIA_ENRICH_CONCURRENCY = max(1, int(os.getenv("NVIDIA_ENRICH_CONCURRENCY", "1")))
 
 EMBED_MODEL = os.getenv("EMBED_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
 DAYS_BACK = int(os.getenv("NEWS_DAYS_BACK", "1"))
@@ -51,7 +64,49 @@ NEWS_CACHE_DIR = os.getenv("NEWS_CACHE_DIR") or os.path.join(os.getcwd(), "data"
 if not os.path.isabs(NEWS_CACHE_DIR):
     NEWS_CACHE_DIR = os.path.abspath(os.path.join(os.getcwd(), NEWS_CACHE_DIR))
 NEWS_CACHE_MAX_AGE_DAYS = int(os.getenv("NEWS_CACHE_MAX_AGE_DAYS", "7"))
+# Sentence-vector cache: one JSON per hash(model + exact text passed to encode).
+EMBEDDING_CACHE_DIR = os.getenv("NEWS_EMBEDDING_CACHE_DIR") or os.path.join(NEWS_CACHE_DIR, "_article_embeddings")
+if not os.path.isabs(EMBEDDING_CACHE_DIR):
+    EMBEDDING_CACHE_DIR = os.path.abspath(os.path.join(os.getcwd(), EMBEDDING_CACHE_DIR))
+ENRICHMENT_CACHE_DIR = os.getenv("NVIDIA_ENRICH_CACHE_DIR") or os.path.join(NEWS_CACHE_DIR, "_nvidia_enrichment")
+if not os.path.isabs(ENRICHMENT_CACHE_DIR):
+    ENRICHMENT_CACHE_DIR = os.path.abspath(os.path.join(os.getcwd(), ENRICHMENT_CACHE_DIR))
 DEFAULT_IMAGE = "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=900&q=80"
+GENERAL_WORLD_FOCUS = "World"
+
+
+def _split_api_keys(raw: str) -> list[str]:
+    return [
+        part.strip()
+        for part in re.split(r"[\s,;]+", raw)
+        if part.strip()
+    ]
+
+
+def _dedupe_preserving_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+NVIDIA_API_KEYS = _dedupe_preserving_order(
+    [NVIDIA_API_KEY] + _split_api_keys(NVIDIA_API_KEYS_RAW)
+)
+_NVIDIA_LOCK = threading.Lock()
+_NVIDIA_KEY_INDEX = 0
+_NVIDIA_NEXT_AVAILABLE_AT_BY_KEY: dict[str, float] = {}
+
+# In-process cache; Nominatim policy: at most ~1 req/s without an API key — we sleep on miss only.
+_GEOCODE_CACHE: dict[str, list[float]] = {}
+NOMINATIM_USER_AGENT = os.getenv(
+    "NOMINATIM_USER_AGENT",
+    "KallikoreNewsWorker/1.0 (personalized-news-demo; contact via repo maintainer)",
+).strip()
 
 COUNTRY_TO_CODE = {
     "argentina": "ar", "australia": "au", "austria": "at", "belgium": "be",
@@ -70,6 +125,7 @@ COUNTRY_TO_CODE = {
 }
 
 LOCATION_COORDS = {
+    "world": [0, 20], "global": [0, 20],
     "argentina": [-58.3816, -34.6037], "australia": [151.2093, -33.8688],
     "brazil": [-47.8825, -15.7942], "canada": [-75.6972, 45.4215],
     "china": [116.4074, 39.9042], "eu": [4.3517, 50.8503],
@@ -108,6 +164,84 @@ def model_cache_exists(model_name: str) -> bool:
 def stable_id(*parts: str) -> str:
     raw = "|".join(parts)
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def enrichment_cache_path(article: dict[str, Any], profile: dict[str, Any], focus: str) -> str:
+    title = str(article.get("title") or "")
+    url = str(article.get("url") or "")
+    summary = str(article.get("summary") or article.get("description") or "")
+    profile_bits = {
+        "hobbies": profile.get("hobbies"),
+        "news_topics": profile.get("news_topics"),
+        "international_news_focus": profile.get("international_news_focus"),
+        "occupation": profile.get("occupation"),
+        "native_language": profile.get("native_language"),
+        "etc": profile.get("etc"),
+    }
+    key = hashlib.sha256(
+        json.dumps(
+            {
+                "model": NVIDIA_ENRICH_MODEL,
+                "focus": focus,
+                "title": title,
+                "url": url,
+                "summary": summary,
+                "profile": profile_bits,
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    return os.path.join(ENRICHMENT_CACHE_DIR, f"{key}.json")
+
+
+def load_cached_enrichment(
+    article: dict[str, Any], profile: dict[str, Any], focus: str
+) -> tuple[str, list[float]] | None:
+    path = enrichment_cache_path(article, profile, focus)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        relevance = data.get("relevance")
+        lng_lat = data.get("lngLat")
+        if (
+            isinstance(relevance, str)
+            and isinstance(lng_lat, list)
+            and len(lng_lat) == 2
+        ):
+            return relevance, [float(lng_lat[0]), float(lng_lat[1])]
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        eprint(f"nvidia enrichment cache read failed: {exc}")
+    return None
+
+
+def save_cached_enrichment(
+    article: dict[str, Any],
+    profile: dict[str, Any],
+    focus: str,
+    relevance: str,
+    lng_lat: list[float],
+) -> None:
+    path = enrichment_cache_path(article, profile, focus)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "cached_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                    "model": NVIDIA_ENRICH_MODEL,
+                    "focus": focus,
+                    "relevance": relevance,
+                    "lngLat": lng_lat,
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+    except Exception as exc:
+        eprint(f"nvidia enrichment cache write failed: {exc}")
 
 
 def cache_date_key(offset_days: int = 0) -> str:
@@ -211,9 +345,56 @@ def article_text(article: dict[str, Any]) -> str:
     )
 
 
-def cosine_sim(a: Any, b: Any) -> float:
-    import numpy as np
+def _embedding_text_fingerprint(text: str) -> str:
+    """Stable filename fragment for the exact string passed to the embedder."""
+    return hashlib.sha256(f"{EMBED_MODEL}\0{text}".encode("utf-8")).hexdigest()
 
+
+def embedding_cache_path_for_text(text: str) -> str:
+    return os.path.join(EMBEDDING_CACHE_DIR, f"{_embedding_text_fingerprint(text)}.json")
+
+
+def load_cached_article_embedding(text: str) -> list[float] | None:
+    if not text.strip():
+        return None
+    path = embedding_cache_path_for_text(text)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as exc:
+        eprint(f"step 4: embedding cache read failed ({path}): {exc}")
+        return None
+    if data.get("model") != EMBED_MODEL:
+        return None
+    vec = data.get("vector")
+    if not isinstance(vec, list) or not vec:
+        return None
+    return [float(x) for x in vec]
+
+
+def save_cached_article_embedding(text: str, vector: list[float]) -> None:
+    if not text.strip():
+        return
+    path = embedding_cache_path_for_text(text)
+    try:
+        os.makedirs(EMBEDDING_CACHE_DIR, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "model": EMBED_MODEL,
+                    "dims": len(vector),
+                    "vector": vector,
+                },
+                f,
+                ensure_ascii=False,
+            )
+    except Exception as exc:
+        eprint(f"step 4: embedding cache write failed ({path}): {exc}")
+
+
+def cosine_sim(a: Any, b: Any) -> float:
     denom = (np.linalg.norm(a) * np.linalg.norm(b)) + 1e-10
     return float(np.dot(a, b) / denom)
 
@@ -265,6 +446,22 @@ def search_news_by_text(text: str) -> list[dict[str, Any]]:
     return search_news(params, text)
 
 
+def general_world_publish_date_params() -> dict[str, str]:
+    """World News API requires at least one filter (text, language, dates, etc.).
+
+    With sort=publish-time, the docs require either ``text`` or both
+    ``earliest-publish-date`` and ``latest-publish-date``. A bare search with only
+    number/sort returned no ``news`` hits.
+    """
+    end = datetime.utcnow()
+    days = max(DAYS_BACK, 1)
+    start = end - timedelta(days=days)
+    return {
+        "earliest-publish-date": start.strftime("%Y-%m-%d"),
+        "latest-publish-date": end.strftime("%Y-%m-%d"),
+    }
+
+
 def search_news_by_country(focus: str, country_code: str) -> list[dict[str, Any]]:
     params = {
         "source-countries": country_code,
@@ -275,6 +472,17 @@ def search_news_by_country(focus: str, country_code: str) -> list[dict[str, Any]
 def fetch_focus_articles(focus: str) -> tuple[list[dict[str, Any]], str]:
     key = normalize_focus(focus)
     country_code = COUNTRY_TO_CODE.get(key)
+
+    if key in {"world", "global", "general", "general world"}:
+        date_params = general_world_publish_date_params()
+        eprint(
+            "step 2: fetching general world search-news "
+            f"(publish-date {date_params['earliest-publish-date']} .. {date_params['latest-publish-date']}; "
+            "no country/keyword/language)"
+        )
+        articles = search_news(date_params, GENERAL_WORLD_FOCUS)
+        eprint(f"step 2: fetched {len(articles)} raw articles for {focus!r}")
+        return articles[:RESULTS_PER_FOCUS], "general-world-search"
 
     if country_code:
         eprint(f"step 2: fetching country search-news for {focus!r} ({country_code}, no language)")
@@ -293,39 +501,207 @@ def detect_language(article: dict[str, Any]) -> str:
     return str(lang or "unknown").split("-")[0].lower()
 
 
-def enrich_reason(article: dict[str, Any], profile: dict[str, Any], focus: str) -> str:
-    if not NVIDIA_API_KEY:
-        topics = profile.get("news_topics") or profile.get("hobbies") or [focus]
-        return f"Relevant to your interest in {', '.join(str(t) for t in topics[:2])} and your focus on {focus}."
+def _strip_json_fence(raw: str) -> str:
+    s = raw.strip()
+    if s.startswith("```"):
+        s = re.sub(r"^```(?:json)?\s*", "", s, flags=re.IGNORECASE)
+        s = re.sub(r"\s*```\s*$", "", s)
+    return s.strip()
 
-    prompt = (
-        "Explain in one concise sentence why this article may be relevant to the user.\n\n"
-        f"Profile JSON:\n{json.dumps(profile, ensure_ascii=False)}\n\n"
-        f"Focus: {focus}\n"
-        f"Article title: {article.get('title', '')}\n"
-        f"Article summary: {article.get('summary') or article.get('description') or ''}"
-    )
+
+def _parse_enrichment_json(raw: str) -> tuple[str | None, str | None]:
+    """Returns (relevance_sentence, pin_location_plain) from model JSON, or (None, None) if invalid."""
     try:
-        res = requests.post(
-            f"{NVIDIA_API_BASE_URL}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {NVIDIA_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": NVIDIA_ENRICH_MODEL,
-                "temperature": 0.6,
-                "max_tokens": 96,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            timeout=30,
+        obj = json.loads(_strip_json_fence(raw))
+    except json.JSONDecodeError:
+        return None, None
+    if not isinstance(obj, dict):
+        return None, None
+    rel = obj.get("relevance")
+    pin = obj.get("pin_location")
+    relevance = str(rel).strip() if rel is not None else ""
+    pin_loc = str(pin).strip() if pin is not None else ""
+    if not relevance:
+        return None, pin_loc or None
+    return relevance, pin_loc or None
+
+
+def _geocode_query(pin_location: str | None, focus: str) -> str:
+    """Build a single geocoder query: specific place + region when helpful."""
+    pin = (pin_location or "").strip()
+    focus_t = focus.strip()
+    if not pin:
+        return focus_t
+    if focus_t and focus_t.lower() not in pin.lower():
+        return f"{pin}, {focus_t}"
+    return pin
+
+
+def geocode_lng_lat(query: str, fallback: list[float]) -> list[float]:
+    """Resolve query to [lng, lat] via Nominatim; on failure return fallback."""
+    q = " ".join(query.split())
+    if not q:
+        return fallback
+    key = q.casefold()
+    if key in _GEOCODE_CACHE:
+        return _GEOCODE_CACHE[key]
+    try:
+        time.sleep(1.1)
+        res = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": q, "format": "json", "limit": 1},
+            headers={"User-Agent": NOMINATIM_USER_AGENT},
+            timeout=15,
         )
         res.raise_for_status()
-        text = res.json()["choices"][0]["message"]["content"].strip()
-        return text or "Relevant to your profile and selected region."
+        data = res.json()
+        if not isinstance(data, list) or not data:
+            return fallback
+        first = data[0]
+        lng = float(first["lon"])
+        lat = float(first["lat"])
+        out = [lng, lat]
+        _GEOCODE_CACHE[key] = out
+        return out
+    except Exception as exc:
+        eprint(f"nominatim geocode failed for {q!r}: {exc}")
+        return fallback
+
+
+def _reserve_nvidia_key() -> tuple[str, int]:
+    global _NVIDIA_KEY_INDEX
+
+    if not NVIDIA_API_KEYS:
+        raise RuntimeError("NVIDIA_API_KEY or NVIDIA_API_KEYS is not set")
+
+    with _NVIDIA_LOCK:
+        key_number = (_NVIDIA_KEY_INDEX % len(NVIDIA_API_KEYS)) + 1
+        key = NVIDIA_API_KEYS[_NVIDIA_KEY_INDEX % len(NVIDIA_API_KEYS)]
+        _NVIDIA_KEY_INDEX += 1
+        now = time.monotonic()
+        available_at = _NVIDIA_NEXT_AVAILABLE_AT_BY_KEY.get(key, now)
+        wait = max(0.0, available_at - now)
+        _NVIDIA_NEXT_AVAILABLE_AT_BY_KEY[key] = max(now, available_at) + NVIDIA_REQUEST_DELAY_SECONDS
+
+    if wait > 0:
+        time.sleep(wait)
+
+    return key, key_number
+
+
+def retry_after_seconds(response: requests.Response | None) -> float | None:
+    if response is None:
+        return None
+    raw = response.headers.get("Retry-After")
+    if not raw:
+        return None
+    raw = raw.strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return None
+
+
+def nvidia_chat_completion(messages: list[dict[str, str]], max_tokens: int) -> str:
+    attempts = max(NVIDIA_MAX_RETRIES, len(NVIDIA_API_KEYS))
+    last_exc: Exception | None = None
+
+    for attempt in range(attempts):
+        key, key_number = _reserve_nvidia_key()
+        try:
+            res = requests.post(
+                f"{NVIDIA_API_BASE_URL}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": NVIDIA_ENRICH_MODEL,
+                    "temperature": 0.45,
+                    "max_tokens": max_tokens,
+                    "messages": messages,
+                },
+                timeout=45,
+            )
+            res.raise_for_status()
+            return res.json()["choices"][0]["message"]["content"].strip()
+        except requests.HTTPError as exc:
+            last_exc = exc
+            status = exc.response.status_code if exc.response is not None else None
+            if status == 429 and attempt < attempts - 1:
+                backoff = retry_after_seconds(exc.response)
+                if backoff is None:
+                    backoff = NVIDIA_429_BACKOFF_SECONDS * (attempt + 1)
+                eprint(
+                    "nvidia enrichment rate limited "
+                    f"(key {key_number}/{len(NVIDIA_API_KEYS)}, attempt {attempt + 1}/{attempts}); "
+                    f"waiting {backoff:.1f}s"
+                )
+                time.sleep(backoff)
+                continue
+            raise
+        except Exception as exc:
+            last_exc = exc
+            if attempt < attempts - 1:
+                time.sleep(min(2.0, NVIDIA_429_BACKOFF_SECONDS))
+                continue
+            raise
+
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("NVIDIA request failed")
+
+
+def enrich_article_context(
+    article: dict[str, Any], profile: dict[str, Any], focus: str
+) -> tuple[str, list[float]]:
+    """LLM relevance line + map coordinates. Coordinates fall back to LOCATION_COORDS for this focus."""
+    location_key = normalize_focus(focus)
+    fallback_lng_lat = LOCATION_COORDS.get(location_key, [0, 20])
+
+    cached = load_cached_enrichment(article, profile, focus)
+    if cached is not None:
+        return cached
+
+    if not NVIDIA_API_KEYS:
+        topics = profile.get("news_topics") or profile.get("hobbies") or [focus]
+        reason = (
+            f"Relevant to your interest in {', '.join(str(t) for t in topics[:2])} "
+            f"and your focus on {focus}."
+        )
+        return reason, fallback_lng_lat
+
+    title = str(article.get("title") or "")
+    summary = str(article.get("summary") or article.get("description") or "")
+    prompt = (
+        "You annotate news for a personalized map.\n\n"
+        "Return ONE JSON object only (no markdown fences, no text before or after). Keys:\n"
+        '- "relevance": one concise sentence — why this article may matter to this user.\n'
+        '- "pin_location": the most specific real-world place the article is mainly about '
+        "(city, district, or well-known landmark), including country or region for disambiguation. "
+        "Plain place name(s) only — no labels like \"City:\", no extra sentences, no quotes inside the value. "
+        f'If the story is only about "{focus}" as a whole with no clearer sub-place, use an empty string "".\n\n'
+        f"Profile JSON:\n{json.dumps(profile, ensure_ascii=False)}\n\n"
+        f"Focus region: {focus}\n"
+        f"Article title: {title}\n"
+        f"Article summary: {summary}"
+    )
+    try:
+        raw = nvidia_chat_completion(
+            [{"role": "user", "content": prompt}],
+            max_tokens=220,
+        )
+        relevance, pin_loc = _parse_enrichment_json(raw)
+        if not relevance:
+            eprint(f"nvidia enrichment: could not parse JSON, raw={raw[:200]!r}")
+            relevance = "Relevant to your profile and selected region."
+        geo_q = _geocode_query(pin_loc, focus)
+        lng_lat = geocode_lng_lat(geo_q, fallback_lng_lat)
+        save_cached_enrichment(article, profile, focus, relevance, lng_lat)
+        return relevance, lng_lat
     except Exception as exc:
         eprint(f"nvidia enrichment unavailable: {exc}")
-        return "Relevant to your profile and selected region."
+        return "Relevant to your profile and selected region.", fallback_lng_lat
 
 
 def coerce_article(article: dict[str, Any], focus: str, score: float, rank: int, profile: dict[str, Any]) -> dict[str, Any]:
@@ -335,8 +711,7 @@ def coerce_article(article: dict[str, Any], focus: str, score: float, rank: int,
     language = detect_language(article)
     date = str(article.get("publish_date") or article.get("publishedAt") or article.get("date") or "")
     url = str(article.get("url") or "#")
-    location_key = normalize_focus(focus)
-    lng_lat = LOCATION_COORDS.get(location_key, [0, 20])
+    ai_reason, lng_lat = enrich_article_context(article, profile, focus)
 
     output = {
         "id": stable_id(focus, title, url, str(rank)),
@@ -350,22 +725,26 @@ def coerce_article(article: dict[str, Any], focus: str, score: float, rank: int,
         "url": url,
         "source": article.get("source") or article.get("source_country") or None,
         "score": round(score, 4),
-        "ai_reason": enrich_reason(article, profile, focus),
+        "ai_reason": ai_reason,
         "language": language,
     }
     return output
 
 
-def rank_for_focus(embedder: Any, profile: dict[str, Any], focus: str, top_n: int) -> tuple[list[dict[str, Any]], list[str], str]:
+def rank_for_focus(
+    embedder: Any, profile: dict[str, Any], focus: str, top_n: int
+) -> tuple[list[dict[str, Any]], list[str], str, tuple[bool, int, int]]:
+    """Returns (ranked, warnings, mode, (profile_vec_from_cache, article_emb_hits, article_emb_total))."""
+    emb_stats: tuple[bool, int, int] = (False, 0, 0)
     warnings: list[str] = []
     eprint(f"step 1: starting focus {focus!r}")
     try:
         articles, query_mode = fetch_focus_articles(focus)
     except Exception as exc:
-        return [], [f"{focus}: World News API request failed after fallback: {request_error_summary(exc)}"], "error"
+        return [], [f"{focus}: World News API request failed after fallback: {request_error_summary(exc)}"], "error", emb_stats
 
     if not articles:
-        return [], [f"{focus}: no articles returned"], "empty"
+        return [], [f"{focus}: no articles returned"], "empty", emb_stats
 
     avoid_terms = [
         str(term).lower()
@@ -383,9 +762,38 @@ def rank_for_focus(embedder: Any, profile: dict[str, Any], focus: str, top_n: in
     eprint(f"step 3: {focus!r} has {len(filtered)} candidate articles after avoid-topic filtering")
 
     eprint(f"step 4: embedding profile and {len(filtered)} articles for {focus!r}")
-    profile_vec = embedder.encode([profile_to_text(profile, focus)], show_progress_bar=False)[0]
+    profile_text = profile_to_text(profile, focus)
+    cached_profile = load_cached_article_embedding(profile_text)
+    if cached_profile is not None:
+        profile_vec = np.asarray(cached_profile, dtype=np.float32)
+        eprint("step 4: profile embedding cache hit")
+    else:
+        profile_vec = embedder.encode([profile_text], show_progress_bar=False)[0]
+        save_cached_article_embedding(profile_text, np.asarray(profile_vec, dtype=np.float32).tolist())
+
     texts = [article_text(article) or str(article.get("title", "")) for article in filtered]
-    vecs = embedder.encode(texts, show_progress_bar=False)
+    vecs: list[Any] = [None] * len(texts)
+    pending: list[tuple[int, str]] = []
+    emb_hits = 0
+    for i, t in enumerate(texts):
+        cached_vec = load_cached_article_embedding(t)
+        if cached_vec is not None:
+            vecs[i] = np.asarray(cached_vec, dtype=np.float32)
+            emb_hits += 1
+        else:
+            pending.append((i, t))
+    if pending:
+        new_vecs = embedder.encode([p[1] for p in pending], show_progress_bar=False)
+        for row, (idx, t) in enumerate(pending):
+            vec = new_vecs[row]
+            vecs[idx] = vec
+            save_cached_article_embedding(t, np.asarray(vec, dtype=np.float32).tolist())
+    eprint(
+        f"step 4: article embedding cache — {emb_hits}/{len(texts)} hits, "
+        f"{len(pending)} computed (stored under _article_embeddings)"
+    )
+    profile_from_cache = cached_profile is not None
+    emb_stats = (profile_from_cache, emb_hits, len(texts))
     scored = [
         (article, cosine_sim(profile_vec, vec))
         for article, vec in zip(filtered, vecs)
@@ -393,11 +801,23 @@ def rank_for_focus(embedder: Any, profile: dict[str, Any], focus: str, top_n: in
     ]
     scored.sort(key=lambda item: item[1], reverse=True)
     eprint(f"step 5: ranked {len(scored)} articles for {focus!r}; keeping top {top_n}")
-    ranked = [
-        coerce_article(article, focus, score, idx + 1, profile)
-        for idx, (article, score) in enumerate(scored[:top_n])
-    ]
-    return ranked, warnings, query_mode
+    top_scored = scored[:top_n]
+    if NVIDIA_ENRICH_CONCURRENCY > 1 and len(top_scored) > 1:
+        workers = min(NVIDIA_ENRICH_CONCURRENCY, len(top_scored))
+        eprint(f"step 5: enriching top articles with {workers} worker(s)")
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            ranked = list(
+                pool.map(
+                    lambda item: coerce_article(item[1][0], focus, item[1][1], item[0] + 1, profile),
+                    enumerate(top_scored),
+                )
+            )
+    else:
+        ranked = [
+            coerce_article(article, focus, score, idx + 1, profile)
+            for idx, (article, score) in enumerate(top_scored)
+        ]
+    return ranked, warnings, query_mode, emb_stats
 
 
 def mock_articles(profile: dict[str, Any], top_n: int) -> list[dict[str, Any]]:
@@ -437,15 +857,33 @@ def run(payload: dict[str, Any]) -> dict[str, Any]:
         for focus in profile.get("international_news_focus", [])
         if str(focus).strip()
     ]
+    using_general_world = False
     if not focuses:
-        focuses = ["Global"]
+        focuses = [GENERAL_WORLD_FOCUS]
+        using_general_world = True
     debug_steps = [
         f"profile focuses: {', '.join(focuses)}",
         f"top_n_per_focus: {top_n}",
         f"candidate cap per focus: {RESULTS_PER_FOCUS}",
-        "country query: one search-news request using source-countries, no language filter",
-        "search-news date range: API default when no date params are provided",
+        (
+            "query mode: general search-news with publish-date window (no country/keyword/language)"
+            if using_general_world
+            else "country query: one search-news request using source-countries, no language filter"
+        ),
+        (
+            f"search-news date range: world/global/general use last {max(DAYS_BACK, 1)} day(s) "
+            "(required by World News API for sort=publish-time); country/keyword use API default"
+        ),
+        (
+            "nvidia enrichment: "
+            f"{len(NVIDIA_API_KEYS)} key(s), "
+            f"{NVIDIA_REQUEST_DELAY_SECONDS:.1f}s min delay per key, "
+            f"concurrency {NVIDIA_ENRICH_CONCURRENCY}, "
+            f"cache {os.path.basename(ENRICHMENT_CACHE_DIR)}"
+        ),
     ]
+    if using_general_world:
+        debug_steps.append("no international_news_focus found; using general world news fallback")
     eprint(f"step 0: profile has {len(focuses)} focus entries: {focuses}")
 
     if not WORLD_NEWS_API_KEY:
@@ -469,13 +907,26 @@ def run(payload: dict[str, Any]) -> dict[str, Any]:
     all_articles: list[dict[str, Any]] = []
     warnings: list[str] = []
     query_modes: dict[str, str] = {}
+    profile_emb_hits = 0
+    article_emb_hits_total = 0
+    article_emb_slots_total = 0
 
     for focus in focuses:
-        ranked, focus_warnings, mode = rank_for_focus(embedder, profile, focus, top_n)
+        ranked, focus_warnings, mode, emb_stats = rank_for_focus(embedder, profile, focus, top_n)
         all_articles.extend(ranked)
         warnings.extend(focus_warnings)
         query_modes[focus] = mode
         debug_steps.append(f"{focus}: query_mode={mode}, returned={len(ranked)}")
+        p_hit, a_hits, a_total = emb_stats
+        if p_hit:
+            profile_emb_hits += 1
+        article_emb_hits_total += a_hits
+        article_emb_slots_total += a_total
+
+    debug_steps.append(
+        f"embedding cache: {profile_emb_hits}/{len(focuses)} profile vector(s) from disk; "
+        f"{article_emb_hits_total}/{article_emb_slots_total} article vector(s) from disk"
+    )
 
     eprint(f"step 6: complete; returning {len(all_articles)} articles")
     return {

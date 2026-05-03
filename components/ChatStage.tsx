@@ -11,6 +11,8 @@ interface ChatStageProps {
   messages: ChatMessage[]
   isHidden: boolean
   isDropdownMode: boolean
+  /** When true with dropdown mode, center the chat in the space left of the 450px news panel (matches Globe padding). */
+  recenterForRightPanel?: boolean
   showGenerateButton: boolean
   isBusy?: boolean
   generateLabel?: string
@@ -22,6 +24,7 @@ export default function ChatStage({
   messages,
   isHidden,
   isDropdownMode,
+  recenterForRightPanel = false,
   showGenerateButton,
   isBusy = false,
   generateLabel = 'Generate My News',
@@ -48,6 +51,7 @@ export default function ChatStage({
   const className = [
     isDropdownMode ? 'dropdown-mode' : '',
     isHidden ? 'hidden' : '',
+    isDropdownMode && recenterForRightPanel ? 'dropdown-offset-right' : '',
   ].filter(Boolean).join(' ')
 
   return (
