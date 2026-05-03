@@ -1,0 +1,134 @@
+{
+  "user_interests": [
+    "agriculture",
+    "aquaculture",
+    "artisan",
+    "climate",
+    "conservation",
+    "digital",
+    "e-commerce",
+    "education",
+    "environmental",
+    "fishing",
+    "innovation",
+    "platform",
+    "rural",
+    "startup",
+    "sustainable",
+    "tech",
+    "technology"
+  ],
+  "config_source": "config.json",
+  "pipeline_status": "completed",
+  "total_articles": 8,
+  "locations_ranked": 7,
+  "pipeline_config": {
+    "translate": true,
+    "extract_interests": true,
+    "score_relevance": true,
+    "generate_reasons": true,
+    "sort_results": true,
+    "save_output": true
+  },
+  "ranking_results": {
+    "Thailand": {
+      "articles": [
+        {
+          "id": 1,
+          "title": "Thai Tech Startup Launches AI Agriculture Platform",
+          "description": "A Bangkok-based startup has developed an AI platform to optimize crop yields for small-scale farmers across Southeast Asia.",
+          "location": "Thailand",
+          "relevance_score": 0.9,
+          "reason": "Matches interest in platform; Matches interest in startup; Top-priority location"
+        },
+        {
+          "id": 5,
+          "title": "Empresa tailandesa revoluciona la acuicultura sostenible",
+          "description": "Una compañía tailandesa está transformando la industria de la acuicultura con métodos innovadores y sostenibles que protegen los arrecifes de coral.",
+          "location": "Thailand",
+          "relevance_score": 0.9,
+          "reason": "Environmental conservation; Top-priority location"
+        }
+      ],
+      "preference_score": 1.0
+    },
+    "Vietnam": {
+      "articles": [
+        {
+          "id": 2,
+          "title": "Plateforme agricole durable au Vietnam",
+          "description": "Une entreprise vietnamienne pionnière crée une plateforme d'agriculture durable utilisant des techniques biologiques et des technologies IoT pour les petits agriculteurs.",
+          "location": "Vietnam",
+          "relevance_score": 0.95,
+          "reason": "Matches interest in agriculture; Matches interest in tech; Top-priority location"
+        }
+      ],
+      "preference_score": 1.0
+    },
+    "Singapore": {
+      "articles": [
+        {
+          "id": 3,
+          "title": "シンガポールの食品テック企業が植物ベースのタンパク質で革新",
+          "description": "シンガポールの新興企業は、持続可能な植物ベースのタンパク質を製造するために培養技術を使用しています。",
+          "location": "Singapore",
+          "relevance_score": 0.0,
+          "reason": "Preferred region"
+        }
+      ],
+      "preference_score": 0.85
+    },
+    "Indonesia": {
+      "articles": [
+        {
+          "id": 4,
+          "title": "Indonesian Artisans Embrace E-Commerce for Global Reach",
+          "description": "Local craftsmakers in Bali are leveraging digital platforms to sell handmade goods directly to international markets, boosting their income.",
+          "location": "Indonesia",
+          "relevance_score": 0.64,
+          "reason": "Matches interest in digital; Matches interest in platform; Key market"
+        }
+      ],
+      "preference_score": 0.8
+    },
+    "Japan": {
+      "articles": [
+        {
+          "id": 6,
+          "title": "Japan's Tech Giants Invest in Southeast Asian Startups",
+          "description": "Major Japanese technology corporations are establishing innovation hubs in Bangkok and Ho Chi Minh City to support emerging tech companies.",
+          "location": "Japan",
+          "relevance_score": 0.64,
+          "reason": "Matches interest in innovation; Matches interest in tech; Matches interest in technology"
+        }
+      ],
+      "preference_score": 0.8
+    },
+    "Philippines": {
+      "articles": [
+        {
+          "id": 7,
+          "title": "フィリピンの教育技術スタートアップが農村部に学習を届ける",
+          "description": "フィリピンの企業は、オフライン対応の教育プラットフォームを開発し、農村地域の学生にアクセスをもたらしています。",
+          "location": "Philippines",
+          "relevance_score": 0.0,
+          "reason": "Secondary region"
+        }
+      ],
+      "preference_score": 0.75
+    },
+    "Malaysia": {
+      "articles": [
+        {
+          "id": 8,
+          "title": "Partenariat malaisien-thaïlandais dans les énergies renouvelables",
+          "description": "La Malaisie et la Thaïlande collaborent pour développer des projets d'énergie solaire et éolienne transfrontaliers.",
+          "location": "Malaysia",
+          "relevance_score": 0.0,
+          "reason": "Emerging market"
+        }
+      ],
+      "preference_score": 0.7
+    }
+  }
+}
