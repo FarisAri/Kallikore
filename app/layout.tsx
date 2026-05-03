@@ -1,24 +1,26 @@
-import type { Metadata } from "next";
-import { Inter } from "next/font/google";
-import "./globals.css";
+import type { Metadata } from 'next'
+import { Outfit } from 'next/font/google'
+import './globals.css'
 
-const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
+const outfit = Outfit({
+  variable: '--font-outfit',
+  subsets: ['latin'],
+  weight: ['300', '400', '600', '700'],
+})
 
 export const metadata: Metadata = {
-  title: "Kallikore — Profile chat",
-  description: "Personalized news profiling conversation",
-};
+  title: 'Kallikore News',
+  description: 'Personalized global news powered by AI',
+}
 
 export default function RootLayout({
   children,
 }: Readonly<{
-  children: React.ReactNode;
+  children: React.ReactNode
 }>) {
   return (
-    <html lang="en">
-      <body className={`${inter.variable} font-sans antialiased`}>
-        {children}
-      </body>
+    <html lang="en" className={outfit.variable}>
+      <body>{children}</body>
     </html>
-  );
+  )
 }

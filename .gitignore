@@ -19,6 +19,8 @@
 
 # data
 /data/sessions/*.json
+/data/huggingface/
+/data/news-cache/
 
 # debug
 npm-debug.log*

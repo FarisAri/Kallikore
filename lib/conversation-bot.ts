@@ -10,6 +10,8 @@ import { toOpenAIMessages } from "@/lib/session-store";
 
 const CHAT_SYSTEM = `You are a skilled interviewer for a personalized news app. You already have (or will receive) a structured profile snapshot—often partly filled from a questionnaire—plus the live chat.
 
+**Brevity (required for now):** Every reply must be **very short**: at most **2 sentences** and **under 45 words** total. At most **one** question. No bullet lists, no long preamble, no recap of their whole profile—warm but minimal.
+
 Your goals:
 - Recommend-relevant understanding: what they read, why, and how deep they like to go.
 - **International coverage:** learn which **other countries or regions** they want news from—not only their home location. Ask which nations matter to them (work, family, politics, sport, travel) and what angle (local politics vs culture vs business) if helpful.
@@ -21,7 +23,7 @@ Your goals:
 
 Depth and pacing (order matters):
 - **Basics first:** Use the profile snapshot to judge what is still missing for a usable news profile. Before you go deep on any one topic, make sure the **core basics** are at least lightly covered: where they are / what geography they care about, what they generally like to read about (including **news_topics** if empty), **other countries or regions** they want international news from, preferred **reading language**, and lightly **occupation** only if useful. If the snapshot shows gaps in those basics, prioritize **one** clear question (or brief prompt) to fill the most important gap—**do not** dive into niche depth on a hobby or a single country until those foundations are reasonably addressed (unless the user explicitly steers you to depth first).
-- **Then go deeper:** Once basics are in good shape (from the snapshot or the user just told you), you may briefly acknowledge that—and **then** use at least one **concrete, topic-specific** follow-up (angles, outlets, time spent, subtopics), not a generic "tell me about yourself."
+- **Then go deeper:** Once basics are in good shape, **one** short, concrete follow-up only—still within the word limit above.
 - When information is thin overall, stay focused on fundamentals; when basics are solid, **narrow in** on one thread (e.g. a single hobby or one foreign country) per turn.
 - Usually **one** main follow-up per turn; occasionally **two** if they are tightly related and both serve the same goal (e.g. closing two small basic gaps).
 
@@ -31,7 +33,6 @@ Sensitivity:
 - If they decline or sidestep a topic, acknowledge and move on.
 
 Style:
-- Keep replies readable: often 2–5 short paragraphs; avoid interrogation lists.
 - Do not output JSON or machine-readable blocks—only natural language for the user.`;
 
 const PROFILE_SYSTEM = `You maintain a structured user profile for a news recommendation system.
@@ -118,17 +119,23 @@ async function completeChat(
   client: OpenAI,
   model: string,
   messages: OpenAI.Chat.ChatCompletionMessageParam[],
+  maxTokens: number,
 ): Promise<string> {
   const res = await client.chat.completions.create({
     model,
     messages,
-    max_tokens: 1400,
-    temperature: 0.65,
+    max_tokens: maxTokens,
+    temperature: 0.55,
   });
   const text = res.choices[0]?.message?.content;
   if (!text) throw new Error("Empty completion from chat model");
   return text;
 }
+
+/** User-visible chat: keep completion budget tight so replies stay short. */
+const CHAT_MAX_TOKENS = 180;
+/** Profile JSON extraction can be longer. */
+const PROFILE_EXTRACT_MAX_TOKENS = 1400;
 
 /**
  * Runs one user turn: conversational reply, then profile JSON refresh (second call).
@@ -164,7 +171,12 @@ export async function runConversationTurn(
     { role: "user", content: trimmed },
   ];
 
-  const assistantText = await completeChat(client, model, chatMessages);
+  const assistantText = await completeChat(
+    client,
+    model,
+    chatMessages,
+    CHAT_MAX_TOKENS,
+  );
 
   const assistantMessageAt = new Date().toISOString();
   const assistantMessage: StoredChatMessage = {
@@ -195,7 +207,12 @@ export async function runConversationTurn(
   let profileFieldUpdatedAt = session.profileFieldUpdatedAt ?? {};
 
   try {
-    const rawProfileText = await completeChat(client, model, extractorMessages);
+    const rawProfileText = await completeChat(
+      client,
+      model,
+      extractorMessages,
+      PROFILE_EXTRACT_MAX_TOKENS,
+    );
     const parsed = parseProfileFromModel(rawProfileText);
     if (parsed) {
       nextProfile = mergeProfiles(session.profile, parsed);

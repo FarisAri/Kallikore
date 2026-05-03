@@ -12,10 +12,13 @@ export function getOpenAIClient(): OpenAI {
   }
   const baseURL =
     process.env.NVIDIA_API_BASE_URL ?? "https://integrate.api.nvidia.com/v1";
-  cached = new OpenAI({ apiKey, baseURL });
+  cached = new OpenAI({
+    apiKey,
+    baseURL,
+  });
   return cached;
 }
 
 export function getChatModel(): string {
-  return process.env.NVIDIA_CHAT_MODEL ?? "minimaxai/minimax-m2.7";
+  return process.env.NVIDIA_CHAT_MODEL ?? "moonshotai/kimi-k2-instruct";
 }
