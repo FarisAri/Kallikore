@@ -40,12 +40,17 @@ export default function ChatStage({
     }
   }, [messages])
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key !== 'Enter') return
+  const handleSend = () => {
     const text = inputValue.trim()
     if (!text || isBusy) return
     onSendMessage(text)
     setInputValue('')
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      handleSend()
+    }
   }
 
   const className = [
@@ -64,17 +69,31 @@ export default function ChatStage({
         ))}
       </div>
       <div className="chat-input-wrapper">
-        <input
-          type="text"
-          id="ai-chat-input"
-          placeholder="I'm interested in..."
-          autoComplete="off"
-          spellCheck={false}
-          disabled={isBusy}
-          value={inputValue}
-          onChange={e => setInputValue(e.target.value)}
-          onKeyDown={handleKeyDown}
-        />
+        <div className="chat-input-inner">
+          <input
+            type="text"
+            id="ai-chat-input"
+            placeholder="I'm interested in..."
+            autoComplete="off"
+            spellCheck={false}
+            disabled={isBusy}
+            value={inputValue}
+            onChange={e => setInputValue(e.target.value)}
+            onKeyDown={handleKeyDown}
+          />
+          <button 
+            className="send-msg-btn" 
+            onClick={handleSend} 
+            disabled={isBusy || !inputValue.trim()}
+            title="Send Message"
+            aria-label="Send Message"
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="22" y1="2" x2="11" y2="13"></line>
+              <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+            </svg>
+          </button>
+        </div>
         {showGenerateButton && (
           <button id="generate-news-btn" onClick={onGenerate} disabled={isBusy}>
             {generateLabel}

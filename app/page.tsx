@@ -69,13 +69,24 @@ export default function Home() {
 
     setSessionId(data.sessionId)
     setProfile(data.profile)
-    setMessages([
-      INITIAL_MESSAGE,
-      ...data.messages.map((m) => ({
-        role: m.role === 'assistant' ? 'ai' as const : 'user' as const,
-        text: m.content,
-      })),
-    ])
+    
+    // Always clear previous chat and fetch dynamic greeting on page load
+    try {
+      const greetRes = await fetch('/api/chat/greet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: data.sessionId, clear: true }),
+      })
+      const greetData = await greetRes.json()
+      if (greetData.reply) {
+        setMessages([{ role: 'ai', text: greetData.reply }])
+      } else {
+        setMessages([INITIAL_MESSAGE])
+      }
+    } catch (e) {
+      setMessages([INITIAL_MESSAGE])
+    }
+    
     setShowGenerateButton(profileReadyForNews(data.profile))
     return true
   }, [])
@@ -94,6 +105,21 @@ export default function Home() {
         window.localStorage.setItem(STORAGE_KEY, created.sessionId)
         setSessionId(created.sessionId)
         setProfile(created.profile)
+        
+        // Fetch greeting for new session
+        try {
+          const greetRes = await fetch('/api/chat/greet', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: created.sessionId }),
+          })
+          const greetData = await greetRes.json()
+          if (greetData.reply && !cancelled) {
+            setMessages([{ role: 'ai', text: greetData.reply }])
+          }
+        } catch (e) {
+          // ignore, keep INITIAL_MESSAGE
+        }
       } catch (e) {
         const text = e instanceof Error ? e.message : 'Failed to start session'
         setMessages([{ role: 'ai', text: `I could not start a session: ${text}` }])
@@ -232,13 +258,24 @@ export default function Home() {
 
   const handleChatToggle = useCallback(() => {
     setIsProfileOpen(false)
-    setIsChatHidden((prev) => !prev)
-  }, [])
+    if (stage === 1) {
+      setIsChatHidden(false) // Always force chat to be open in stage 1
+    } else {
+      setIsChatHidden((prev) => !prev)
+    }
+  }, [stage])
 
   const handleProfileToggle = useCallback(() => {
-    setIsChatHidden(true)
-    setIsProfileOpen((prev) => !prev)
-  }, [])
+    setIsProfileOpen((prev) => {
+      const willBeOpen = !prev;
+      if (stage === 1) {
+        setIsChatHidden(willBeOpen); // Hide chat only when profile is open
+      } else {
+        setIsChatHidden(true);
+      }
+      return willBeOpen;
+    })
+  }, [stage])
 
   const handleProfileSave = useCallback(async (nextProfile: UserProfile) => {
     if (!sessionId || isSavingProfile) return
@@ -250,11 +287,15 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ profile: nextProfile }),
       })
-      const data = await res.json() as { profile?: UserProfile; error?: string }
+      const data = await res.json() as { profile?: UserProfile; messages?: any[]; error?: string }
       if (!res.ok) throw new Error(data.error ?? `Profile save failed (${res.status})`)
       if (data.profile) {
         setProfile(data.profile)
         setShowGenerateButton(profileReadyForNews(data.profile))
+        
+        if (data.messages && data.messages.length === 0) {
+          setMessages([{ role: 'ai', text: "Profile cleared. I've wiped your chat history. What would you like to read about instead?" }])
+        }
       }
       setIsProfileOpen(false)
     } catch (e) {
@@ -277,6 +318,14 @@ export default function Home() {
         rightPanelPinned={isPanelForcedOpen}
         onArticleClick={handleArticleClick}
       />
+      {stage === 1 && (
+        <div className="hero-overlay">
+          <div className="hero-content">
+            <h1 className="hero-title">Kallikore <span className="hero-highlight">AI</span></h1>
+            <p className="hero-subtitle">Experience the world's news, curated precisely to your interests.</p>
+          </div>
+        </div>
+      )}
       <ChatStage
         messages={messages}
         isHidden={isChatHidden}
@@ -289,36 +338,40 @@ export default function Home() {
         onGenerate={handleGenerateNews}
       />
       <div id="right-panel-dock">
-        <div
-          id="right-panel-trigger"
-          onMouseEnter={() => setRightPanelPeekDismissed(false)}
-          aria-hidden
-        />
-        {!isPanelForcedOpen && (stage === 2 || stage === 3) && (
-          <button
-            type="button"
-            id="news-panel-reopen"
-            aria-label="Open news panel"
-            title="News"
-            onClick={handleReopenNewsPanel}
-          >
-            <span className="news-panel-reopen-chevron" aria-hidden>
-              ‹
-            </span>
-            <span>News</span>
-          </button>
+        {stage !== 1 && (
+          <>
+            <div
+              id="right-panel-trigger"
+              onMouseEnter={() => setRightPanelPeekDismissed(false)}
+              aria-hidden
+            />
+            {!isPanelForcedOpen && (stage === 2 || stage === 3) && (
+              <button
+                type="button"
+                id="news-panel-reopen"
+                aria-label="Open news panel"
+                title="News"
+                onClick={handleReopenNewsPanel}
+              >
+                <span className="news-panel-reopen-chevron" aria-hidden>
+                  ‹
+                </span>
+                <span>News</span>
+              </button>
+            )}
+            <RightPanel
+              stage={stage}
+              articles={articles}
+              selectedArticle={selectedArticle}
+              isForcedOpen={isPanelForcedOpen}
+              peekDismissed={rightPanelPeekDismissed}
+              status={newsStatus}
+              onArticleClick={handleArticleClick}
+              onBack={handleBack}
+              onCollapse={handleRightPanelCollapse}
+            />
+          </>
         )}
-        <RightPanel
-          stage={stage}
-          articles={articles}
-          selectedArticle={selectedArticle}
-          isForcedOpen={isPanelForcedOpen}
-          peekDismissed={rightPanelPeekDismissed}
-          status={newsStatus}
-          onArticleClick={handleArticleClick}
-          onBack={handleBack}
-          onCollapse={handleRightPanelCollapse}
-        />
       </div>
       <ProfilePanel
         profile={profile}

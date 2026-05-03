@@ -2,6 +2,7 @@ import { spawn } from "child_process";
 import path from "path";
 import { NextResponse } from "next/server";
 import { loadSession } from "@/lib/session-store";
+import { execSync } from 'child_process';
 
 export const runtime = "nodejs";
 
@@ -17,8 +18,27 @@ type WorkerPayload = {
   error?: string;
 };
 
+function getPythonPath(): string {
+  try {
+    // Try to find python3 first, then python
+    const command = process.platform === 'win32' ? 'where' : 'which';
+
+    // Check python3
+    try {
+      return execSync(`${command} python3`).toString().trim().split('\r\n')[0];
+    } catch {
+      // If python3 fails, check python
+      return execSync(`${command} python`).toString().trim().split('\r\n')[0];
+    }
+  } catch (err) {
+    console.error("Python not found in system PATH.");
+    return "python"; // Fallback to just the command string
+  }
+}
+
+
 function runNewsWorker(profile: unknown): Promise<WorkerPayload> {
-  const python = process.env.PYTHON_BIN?.trim() || "python";
+  const python = getPythonPath();
   const workerPath = path.join(process.cwd(), "news_pipeline", "worker.py");
   const input = JSON.stringify({ profile, top_n_per_focus: 5 });
   const startedAt = Date.now();

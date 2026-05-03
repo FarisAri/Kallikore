@@ -103,6 +103,7 @@ _NVIDIA_NEXT_AVAILABLE_AT_BY_KEY: dict[str, float] = {}
 
 # In-process cache; Nominatim policy: at most ~1 req/s without an API key — we sleep on miss only.
 _GEOCODE_CACHE: dict[str, list[float]] = {}
+_NOMINATIM_LOCK = threading.Lock()
 NOMINATIM_USER_AGENT = os.getenv(
     "NOMINATIM_USER_AGENT",
     "KallikoreNewsWorker/1.0 (personalized-news-demo; contact via repo maintainer)",
@@ -543,29 +544,31 @@ def geocode_lng_lat(query: str, fallback: list[float]) -> list[float]:
     if not q:
         return fallback
     key = q.casefold()
-    if key in _GEOCODE_CACHE:
-        return _GEOCODE_CACHE[key]
-    try:
-        time.sleep(1.1)
-        res = requests.get(
-            "https://nominatim.openstreetmap.org/search",
-            params={"q": q, "format": "json", "limit": 1},
-            headers={"User-Agent": NOMINATIM_USER_AGENT},
-            timeout=15,
-        )
-        res.raise_for_status()
-        data = res.json()
-        if not isinstance(data, list) or not data:
+    
+    with _NOMINATIM_LOCK:
+        if key in _GEOCODE_CACHE:
+            return _GEOCODE_CACHE[key]
+        try:
+            time.sleep(1.1)
+            res = requests.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={"q": q, "format": "json", "limit": 1},
+                headers={"User-Agent": NOMINATIM_USER_AGENT},
+                timeout=15,
+            )
+            res.raise_for_status()
+            data = res.json()
+            if not isinstance(data, list) or not data:
+                return fallback
+            first = data[0]
+            lng = float(first["lon"])
+            lat = float(first["lat"])
+            out = [lng, lat]
+            _GEOCODE_CACHE[key] = out
+            return out
+        except Exception as exc:
+            eprint(f"nominatim geocode failed for {q!r}: {exc}")
             return fallback
-        first = data[0]
-        lng = float(first["lon"])
-        lat = float(first["lat"])
-        out = [lng, lat]
-        _GEOCODE_CACHE[key] = out
-        return out
-    except Exception as exc:
-        eprint(f"nominatim geocode failed for {q!r}: {exc}")
-        return fallback
 
 
 def _reserve_nvidia_key() -> tuple[str, int]:
@@ -910,10 +913,24 @@ def run(payload: dict[str, Any]) -> dict[str, Any]:
     profile_emb_hits = 0
     article_emb_hits_total = 0
     article_emb_slots_total = 0
+    seen_urls = set()
+    seen_titles = set()
 
     for focus in focuses:
         ranked, focus_warnings, mode, emb_stats = rank_for_focus(embedder, profile, focus, top_n)
-        all_articles.extend(ranked)
+        for article in ranked:
+            url = article.get("url", "")
+            title = article.get("title", "")
+            if url and url != "#" and url in seen_urls:
+                continue
+            if title and title in seen_titles:
+                continue
+            if url and url != "#":
+                seen_urls.add(url)
+            if title:
+                seen_titles.add(title)
+            all_articles.append(article)
+            
         warnings.extend(focus_warnings)
         query_modes[focus] = mode
         debug_steps.append(f"{focus}: query_mode={mode}, returned={len(ranked)}")

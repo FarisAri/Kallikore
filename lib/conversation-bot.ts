@@ -22,6 +22,7 @@ Your goals:
 - Optional life context (approximate age or life stage) **only if natural**.
 
 Depth and pacing (order matters):
+- **User updates:** If the user explicitly asks to change, update, or remove something from their profile (e.g. "I don't care about sports anymore" or "remove France"), acknowledge it concisely and confirm it's updated. The backend will handle the removal.
 - **Basics first:** Use the profile snapshot to judge what is still missing for a usable news profile. Before you go deep on any one topic, make sure the **core basics** are at least lightly covered: where they are / what geography they care about, what they generally like to read about (including **news_topics** if empty), **other countries or regions** they want international news from, preferred **reading language**, and lightly **occupation** only if useful. If the snapshot shows gaps in those basics, prioritize **one** clear question (or brief prompt) to fill the most important gap—**do not** dive into niche depth on a hobby or a single country until those foundations are reasonably addressed (unless the user explicitly steers you to depth first).
 - **Then go deeper:** Once basics are in good shape, **one** short, concrete follow-up only—still within the word limit above.
 - When information is thin overall, stay focused on fundamentals; when basics are solid, **narrow in** on one thread (e.g. a single hobby or one foreign country) per turn.
@@ -63,7 +64,7 @@ Output requirements:
 - "avoid_topics" are short tags for themes to down-rank or filter out (user-stated only).
 - Use null for unknown scalar fields. Use [] for empty arrays.
 - "etc" is only for **other** small facts (e.g. {"sports_teams":["Blazers"]})—never duplicate occupation, news_topics, or avoid_topics there.
-- Merge: preserve prior correct values unless the conversation clearly changes them.`;
+- Merge: preserve prior correct values unless the conversation clearly changes them. **CRITICAL: If the user explicitly asks to remove or delete a topic, hobby, location, or any other detail, you MUST remove it from the JSON. For arrays, omit the removed item. For scalars, set to null.**`;
 
 function buildChatSystemContent(session: SessionData): string {
   const snapshot = JSON.stringify(session.profile ?? emptyProfile());

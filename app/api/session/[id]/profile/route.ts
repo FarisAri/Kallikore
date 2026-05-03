@@ -35,17 +35,21 @@ export async function PUT(
       changed,
       now,
     );
+    const isEmpty = !nextProfile.user_location && !nextProfile.native_language && !nextProfile.occupation && !nextProfile.age && !nextProfile.ethnicity && nextProfile.hobbies.length === 0 && nextProfile.international_news_focus.length === 0 && nextProfile.news_topics.length === 0 && nextProfile.avoid_topics.length === 0 && Object.keys(nextProfile.etc).length === 0;
+
     const nextSession = {
       ...session,
       profile: nextProfile,
       profileFieldUpdatedAt,
       updatedAt: now,
+      messages: isEmpty ? [] : session.messages,
     };
     await saveSession(nextSession);
     return NextResponse.json({
       sessionId: nextSession.id,
       profile: nextProfile,
       profileFieldUpdatedAt,
+      messages: nextSession.messages,
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Unknown error";

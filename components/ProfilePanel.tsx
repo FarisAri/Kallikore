@@ -107,11 +107,21 @@ export default function ProfilePanel({
     await onSave({ ...draft, etc })
   }
 
+  function handleClearProfile() {
+    setDraft(emptyEditableProfile())
+    setNewItems({})
+    setEtcText('{}')
+    setLocalError(null)
+  }
+
   return (
     <div id="profile-panel" className={isOpen ? 'open' : undefined} aria-hidden={!isOpen}>
       <div className="profile-panel-header">
         <h2>Current Profile</h2>
         <div className="profile-panel-actions">
+          <button type="button" onClick={handleClearProfile} disabled={isSaving} style={{ borderColor: 'rgba(248, 113, 113, 0.35)', color: '#fca5a5' }}>
+            Clear
+          </button>
           <button type="button" onClick={handleSubmit} disabled={isSaving}>
             {isSaving ? 'Saving...' : 'Save'}
           </button>
