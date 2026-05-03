@@ -1,0 +1,58 @@
+.profileContainer {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 3rem 1.5rem;
+}
+
+.header {
+  margin-bottom: 2rem;
+}
+
+.header p {
+  color: var(--text-muted);
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  background-color: var(--surface);
+  padding: 2rem;
+  border-radius: 16px;
+  border: 1px solid var(--surface-border);
+}
+
+.formGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.label {
+  font-weight: 500;
+  font-size: 0.95rem;
+}
+
+.input {
+  background-color: rgba(0, 0, 0, 0.2);
+  border: 1px solid var(--surface-border);
+  color: var(--text-main);
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.input:focus {
+  border-color: var(--primary);
+}
+
+.textarea {
+  min-height: 100px;
+  resize: vertical;
+}
+
+.saveBtn {
+  margin-top: 1rem;
+  align-self: flex-end;
+}
