@@ -1,12 +1,16 @@
 import json
 import os
 import re
+import requests
+
+# LibreTranslate Configuration
+LIBRETRANSLATE_URL = "http://localhost:5000/translate"
 
 try:
-    from google.cloud import translate_v2
-    HAS_GOOGLE_API = True
+    import requests
+    HAS_REQUESTS = True
 except ImportError:
-    HAS_GOOGLE_API = False
+    HAS_REQUESTS = False
 
 # Fallback translations for demo purposes
 FALLBACK_TRANSLATIONS = {
@@ -17,41 +21,48 @@ FALLBACK_TRANSLATIONS = {
     8: "Malaysia and Thailand are collaborating to develop cross-border solar and wind energy projects."
 }
 
-def get_google_translate_client():
-    """Initialize Google Translate client if credentials are available."""
-    if not HAS_GOOGLE_API:
-        return None
+def translate_text_libretranslate(text, source_lang, target_lang='en'):
+    """Translate using locally hosted LibreTranslate."""
+    if source_lang == target_lang or source_lang == 'en':
+        return text
     
     try:
-        if 'GOOGLE_APPLICATION_CREDENTIALS' in os.environ:
-            return translate_v2.Client()
-        return None
-    except Exception as e:
-        print(f"⚠ Could not initialize Google Translate: {e}")
-        return None
-
-def translate_text_google(client, text, source_lang, target_lang='en'):
-    """Translate using Google Translate API."""
-    try:
-        if source_lang == target_lang or source_lang == 'en':
-            return text
+        # Map language codes if needed (ISO 639-1 to LibreTranslate codes)
+        lang_mapping = {
+            'fr': 'fr',
+            'es': 'es',
+            'de': 'de',
+            'it': 'it',
+            'ja': 'ja',
+            'pt': 'pt',
+            'ru': 'ru',
+            'cs': 'cs',
+            'en': 'en'
+        }
         
-        result = client.translate_text(
-            text,
-            source_language_code=source_lang,
-            target_language_code=target_lang
-        )
-        return result['translatedText']
+        source_code = lang_mapping.get(source_lang, source_lang)
+        target_code = lang_mapping.get(target_lang, target_lang)
+        
+        payload = {
+            'q': text,
+            'source': source_code,
+            'target': target_code
+        }
+        
+        response = requests.post(LIBRETRANSLATE_URL, json=payload, timeout=10)
+        response.raise_for_status()
+        
+        result = response.json()
+        return result.get('translatedText', text)
+    except requests.exceptions.ConnectionError:
+        print(f"⚠ Could not connect to LibreTranslate at {LIBRETRANSLATE_URL}")
+        return None
     except Exception as e:
-        print(f"⚠ Translation error: {e}. Using fallback.")
+        print(f"⚠ Translation error: {e}")
         return None
 
-def translate_articles(input_file, output_file, use_google_api=True):
-    """Translate non-English article descriptions to English."""
-    
-    google_client = None
-    if use_google_api:
-        google_client = get_google_translate_client()
+def translate_articles(input_file, output_file, use_libretranslate=True):
+    """Translate non-English article titles and descriptions to English."""
     
     with open(input_file, 'r', encoding='utf-8') as f:
         data = json.load(f)
@@ -59,35 +70,49 @@ def translate_articles(input_file, output_file, use_google_api=True):
     translated_articles = []
     
     print(f"Processing {len(data['articles'])} articles...")
-    print(f"Translation method: {'Google Translate API' if google_client else 'Fallback (demo)'}")
+    print(f"Translation method: {'LibreTranslate' if use_libretranslate else 'Fallback (demo)'}")
     print("-" * 60)
     
     for article in data['articles']:
         article_id = article.get('id')
         original_lang = article.get('language', 'en')
+        title = article.get('title', '')
         description = article.get('description', '')
         
         translated_article = article.copy()
         
         if original_lang != 'en':
-            translated_text = None
-            
-            if google_client:
-                translated_text = translate_text_google(
-                    google_client, 
-                    description, 
-                    original_lang, 
+            # Translate title
+            translated_title = None
+            if use_libretranslate:
+                translated_title = translate_text_libretranslate(
+                    title,
+                    original_lang,
                     'en'
                 )
             
-            if translated_text is None:
-                if article_id in FALLBACK_TRANSLATIONS:
-                    translated_text = FALLBACK_TRANSLATIONS[article_id]
-                else:
-                    translated_text = description
+            if translated_title is None:
+                translated_title = title
             
+            # Translate description
+            translated_desc = None
+            if use_libretranslate:
+                translated_desc = translate_text_libretranslate(
+                    description,
+                    original_lang,
+                    'en'
+                )
+            
+            if translated_desc is None:
+                if article_id in FALLBACK_TRANSLATIONS:
+                    translated_desc = FALLBACK_TRANSLATIONS[article_id]
+                else:
+                    translated_desc = description
+            
+            translated_article['title_original'] = title
+            translated_article['title'] = translated_title
             translated_article['description_original'] = description
-            translated_article['description'] = translated_text
+            translated_article['description'] = translated_desc
             print(f"✓ Article {article_id} ({original_lang} → en)")
         else:
             print(f"✓ Article {article_id} (en) - No translation needed")
@@ -101,7 +126,7 @@ def translate_articles(input_file, output_file, use_google_api=True):
         'metadata': {
             'total_articles': len(translated_articles),
             'target_language': 'en',
-            'translation_method': 'google_api' if google_client else 'fallback'
+            'translation_service': 'libretranslate_local'
         }
     }
     
@@ -112,5 +137,15 @@ def translate_articles(input_file, output_file, use_google_api=True):
     return output_data
 
 if __name__ == '__main__':
-    result = translate_articles('articles.json', 'articles_translated.json')
-    print(f"✓ Successfully translated {result['metadata']['total_articles']} articles")
+    import sys
+    
+    input_file = 'articles.json'
+    output_file = 'articles_translated.json'
+    
+    if len(sys.argv) > 1:
+        input_file = sys.argv[1]
+    if len(sys.argv) > 2:
+        output_file = sys.argv[2]
+    
+    result = translate_articles(input_file, output_file, use_libretranslate=True)
+    print(f"\u2713 Successfully translated {result['metadata']['total_articles']} articles")
