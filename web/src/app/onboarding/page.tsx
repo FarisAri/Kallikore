@@ -26,7 +26,7 @@ export default function Onboarding() {
       if (stored) {
         setMessages([{ role: 'assistant', content: "I see you already have a profile saved! What would you like to change or add to it?" }]);
       } else {
-        setMessages([{ role: 'assistant', content: "Hi! I'm here to build your personalized news profile. To get started, what's your name and what do you do for a living?" }]);
+        setMessages([{ role: 'assistant', content: "Hi! I'm here to build your personalized movie profile. To get started, what's your name and what are a few of your all-time favorite movies or TV shows?" }]);
       }
     }
     scrollToBottom();
@@ -62,7 +62,7 @@ export default function Onboarding() {
           
           setMessages((prev) => [
             ...prev, 
-            { role: 'assistant', content: "Perfect! I've built your profile. Let me fetch your personalized news feed..." }
+            { role: 'assistant', content: "Perfect! I've built your profile. Let me fetch your personalized movie recommendations..." }
           ]);
           
           setTimeout(() => {

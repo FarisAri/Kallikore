@@ -8,11 +8,11 @@ import logging
 from main import (
     anthropic_client,
     build_profile_embedding,
-    get_top_country_news,
-    search_articles_by_keywords,
-    rank_articles,
+    get_popular_movies,
+    get_top_rated_movies_with_embeddings,
+    search_movies_by_keywords,
+    rank_movies,
     profile_to_text,
-    DAYS_BACK,
     TOP_N
 )
 
@@ -37,32 +37,29 @@ class ChatRequest(BaseModel):
 class ProfileRequest(BaseModel):
     name: Optional[str] = None
     age: Optional[int] = None
-    ethnicity: Optional[str] = None
-    occupation: Optional[str] = None
-    locations: Optional[List[str]] = None
-    hobbies: Optional[List[str]] = None
-    interests: Optional[List[str]] = None
-    countries_of_interest: Optional[List[str]] = None
+    favorite_genres: Optional[List[str]] = None
+    favorite_movies: Optional[List[str]] = None
+    favorite_directors: Optional[List[str]] = None
+    favorite_actors: Optional[List[str]] = None
     extra: Optional[str] = None
 
 @app.post("/api/chat")
 def chat(req: ChatRequest):
     system_prompt = """
-    You are an intelligent, friendly onboarding assistant for a personalized news curation app.
-    Your goal is to get to know the user so you can build a profile of their interests, background, and preferences.
+    You are an intelligent, friendly onboarding assistant for a personalized movie recommendation app.
+    Your goal is to get to know the user so you can build a profile of their movie tastes, favorite genres, and preferences.
     Keep your questions natural, conversational, and brief. Ask 1-2 questions at a time.
+    If a user doesn't know specific genres or director names, don't press them. Instead, ask them about their favorite movies or TV shows, from which you can infer other data points.
     Try your best to get information for all of the fields in the profile. If a user ignores a question, try asking it again in a different way, but dont force them to answer.
     If you feel you have enough information, output a JSON block summarizing the profile in the following format inside a markdown code block:
     ```json
     {
         "name": "...",
         "age": 28,
-        "ethnicity": "...",
-        "occupation": "...",
-        "locations": ["...", "..."],
-        "hobbies": ["...", "..."],
-        "interests": ["...", "..."],
-        "countries_of_interest": ["...", "..."],
+        "favorite_genres": ["...", "..."],
+        "favorite_movies": ["...", "..."],
+        "favorite_directors": ["...", "..."],
+        "favorite_actors": ["...", "..."],
         "extra": "..."
     }
     ```
@@ -88,48 +85,50 @@ def chat(req: ChatRequest):
         logging.error(f"Error calling LLM: {e}")
         return {"reply": "I'm sorry, I'm having trouble connecting to my brain right now. Can you try again?"}
 
-@app.post("/api/news")
-def get_news(profile: ProfileRequest):
+@app.post("/api/movies")
+def get_movies(profile: ProfileRequest):
     profile_dict = profile.model_dump(exclude_none=True)
     if not profile_dict:
-        return {"articles": []}
+        return {"movies": []}
         
     profile_text = profile_to_text(profile_dict)
     profile_vec = build_profile_embedding(profile_text)
     
-    prompt = f"Extract a few broad search keywords (4-10) or short phrases from this user profile to find relevant news articles. Return ONLY the keywords separated by commas, no other text.\n\nProfile:\n{profile_text}"
-    try:
-        kw_response = anthropic_client.messages.create(
-            model="claude-haiku-4-5",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=100
-        )
-        keywords_str = kw_response.content[0].text
-        keywords = [k.strip() for k in keywords_str.split(",") if k.strip()]
-    except Exception as e:
-        logging.error(f"Error extracting keywords: {e}")
-        keywords = []
+    # prompt = f"Extract a few broad search keywords (4-10) or short phrases from this user profile to find relevant movies. Return ONLY the keywords separated by commas, no other text.\n\nProfile:\n{profile_text}"
+    # try:
+    #     kw_response = anthropic_client.messages.create(
+    #         model="claude-haiku-4-5",
+    #         messages=[{"role": "user", "content": prompt}],
+    #         max_tokens=100
+    #     )
+    #     keywords_str = kw_response.content[0].text
+    #     keywords = [k.strip() for k in keywords_str.split(",") if k.strip()]
+    # except Exception as e:
+    #     logging.error(f"Error extracting keywords: {e}")
+    #     keywords = []
         
-    print("Extracted Keywords:", keywords)
+    # print("Extracted Keywords:", keywords)
 
-    articles = search_articles_by_keywords(keywords)
-    print("Extracted Articles:")
-    for art in articles:
-        print(art['title'] + "|" + art['url'])
-    articles += get_top_country_news("", DAYS_BACK)
+    # movies = search_movies_by_keywords(keywords)
+    # print("Extracted Movies:")
+    # for m in movies:
+    #     print(m['title'] + "|" + m['url'])
+
+    movies = get_popular_movies()
+    movies += get_top_rated_movies_with_embeddings()
         
-    ranked = rank_articles(profile_vec, articles)
+    ranked = rank_movies(profile_vec, movies)
     
     seen = set()
     unique_ranked = []
-    for a in ranked:
-        if a['url'] not in seen:
-            seen.add(a['url'])
-            unique_ranked.append(a)
+    for m in ranked:
+        if m['url'] not in seen:
+            seen.add(m['url'])
+            unique_ranked.append(m)
             
     top = unique_ranked[:TOP_N]
     
-    return {"articles": top}
+    return {"movies": top}
 
 if __name__ == "__main__":
     import uvicorn
